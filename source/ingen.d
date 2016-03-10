@@ -285,10 +285,33 @@ class InGenFactory {
 							InGenFactory.instances[s] = tmp;
 							__traits(getMember, ret, it) = tmp;
 						}
+						recreateStandaloneInjectabiles(
+							__traits(getMember, ret, it)
+						);
 					} else if(jt.length > 0 && jt[0] == InGenEnums.New) {
 						__traits(getMember, ret, it) = 
 							InGenFactory.make!Type(jt[1 .. $]);
+						recreateStandaloneInjectabiles(
+							__traits(getMember, ret, it)
+						);
 					}
+				}
+			}
+		}
+	}
+
+	static void recreateStandaloneInjectabiles(T)(ref T t) {
+		foreach(it; __traits(allMembers, T)) {
+			foreach(jt; __traits(getAttributes, __traits(getMember, T, it))) {
+				static if(isTuple!(typeof(jt))) {
+					alias Type = typeof(__traits(getMember, T, it));
+					if(jt.length > 0 && jt[0] == InGenEnums.New) {
+						__traits(getMember, t, it) = 
+							InGenFactory.make!Type(jt[1 .. $]);
+					}
+					recreateStandaloneInjectabiles(
+						__traits(getMember, t, it)
+					);
 				}
 			}
 		}
