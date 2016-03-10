@@ -1,7 +1,7 @@
 InGen
 =========
 
-![alt text](https://travis-ci.org/burner/ingen.svg)
+![alt text](https://travis-ci.org/burner/InGen.svg?branch=master)
 
 InGen is a dependency injection Framework.
 
