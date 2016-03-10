@@ -1,6 +1,6 @@
 {
 	"name": "ingen",
-	"description": "A minimal D application.",
+	"description": "A dependency injection Framework",
 	"license": "boost",
 	"copyright": "Copyright © 2016, burner",
 	"authors": ["burner"],
