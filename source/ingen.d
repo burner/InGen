@@ -21,6 +21,274 @@ struct InGenNew {
 		return tuple(InGenEnums.New, args);
 	}
 }
+
+private {
+T emplace(T, Args...)(void[] chunk, auto ref Args args)
+    if (is(T == class))
+{
+	import std.traits;
+    enum classSize = __traits(classInstanceSize, T);
+    testEmplaceChunk(chunk, classSize, classInstanceAlignment!T, T.stringof);
+    auto result = cast(T) chunk.ptr;
+
+    // Initialize the object in its pre-ctor state
+    chunk[0 .. classSize] = typeid(T).init[];
+	InGenFactory.makeClass(result, args);
+
+    // Call the ctor if any
+    static if (is(typeof(result.__ctor(args))))
+    {
+        // T defines a genuine constructor accepting args
+        // Go the classic route: write .init first, then call ctor
+        result.__ctor(args);
+    }
+    else
+    {
+        static assert(args.length == 0 && !is(typeof(&T.__ctor)),
+                "Don't know how to initialize an object of type "
+                ~ T.stringof ~ " with arguments " ~ Args.stringof);
+    }
+    return result;
+}
+
+T* emplace(T, Args...)(void[] chunk, auto ref Args args)
+    if (!is(T == class))
+{
+    testEmplaceChunk(chunk, T.sizeof, T.alignof, T.stringof);
+    return emplace(cast(T*) chunk.ptr, args);
+}
+
+package ref UT emplaceRef(UT, Args...)(ref UT chunk, auto ref Args args)
+if (is(UT == Unqual!UT))
+{
+    return emplaceImpl!UT(chunk, args);
+}
+// ditto
+package ref UT emplaceRef(T, UT, Args...)(ref UT chunk, auto ref Args args)
+if (is(UT == Unqual!T) && !is(T == UT))
+{
+    return emplaceImpl!T(chunk, args);
+}
+
+
+private template emplaceImpl(T)
+{
+    alias UT = Unqual!T;
+
+    ref UT emplaceImpl()(ref UT chunk)
+    {
+        static assert (is(typeof({static T i;})),
+            convFormat("Cannot emplace a %1$s because %1$s.this() is annotated with @disable.", T.stringof));
+
+        return emplaceInitializer(chunk);
+    }
+
+    static if (!is(T == struct))
+    ref UT emplaceImpl(Arg)(ref UT chunk, auto ref Arg arg)
+    {
+        static assert(is(typeof({T t = arg;})),
+            convFormat("%s cannot be emplaced from a %s.", T.stringof, Arg.stringof));
+
+        static if (isStaticArray!T)
+        {
+            alias UArg = Unqual!Arg;
+            alias E = ElementEncodingType!(typeof(T.init[]));
+            alias UE = Unqual!E;
+            enum n = T.length;
+
+            static if (is(Arg : T))
+            {
+                //Matching static array
+                static if (!hasElaborateAssign!UT && isAssignable!(UT, Arg))
+                    chunk = arg;
+                else static if (is(UArg == UT))
+                {
+                    import core.stdc.string : memcpy;
+                    // This is known to be safe as the two values are the same
+                    // type and the source (arg) should be initialized
+                    () @trusted { memcpy(&chunk, &arg, T.sizeof); }();
+                    static if (hasElaborateCopyConstructor!T)
+                        _postblitRecurse(chunk);
+                }
+                else
+                    .emplaceImpl!T(chunk, cast(T)arg);
+            }
+            else static if (is(Arg : E[]))
+            {
+                //Matching dynamic array
+                static if (!hasElaborateAssign!UT && is(typeof(chunk[] = arg[])))
+                    chunk[] = arg[];
+                else static if (is(Unqual!(ElementEncodingType!Arg) == UE))
+                {
+                    import core.stdc.string : memcpy;
+                    assert(n == chunk.length, "Array length missmatch in emplace");
+
+                    // This is unsafe as long as the length match is a
+                    // precondition and not an unconditional exception
+                    memcpy(&chunk, arg.ptr, T.sizeof);
+
+                    static if (hasElaborateCopyConstructor!T)
+                        _postblitRecurse(chunk);
+                }
+                else
+                    .emplaceImpl!T(chunk, cast(E[])arg);
+            }
+            else static if (is(Arg : E))
+            {
+                //Case matching single element to array.
+                static if (!hasElaborateAssign!UT && is(typeof(chunk[] = arg)))
+                    chunk[] = arg;
+                else static if (is(UArg == Unqual!E))
+                {
+                    import core.stdc.string : memcpy;
+
+                    foreach(i; 0 .. n)
+                    {
+                        // This is known to be safe as the two values are the same
+                        // type and the source (arg) should be initialized
+                        () @trusted { memcpy(&(chunk[i]), &arg, E.sizeof); }();
+                    }
+
+                    static if (hasElaborateCopyConstructor!T)
+                        _postblitRecurse(chunk);
+                }
+                else
+                    //Alias this. Coerce.
+                    .emplaceImpl!T(chunk, cast(E)arg);
+            }
+            else static if (is(typeof(.emplaceImpl!E(chunk[0], arg))))
+            {
+                //Final case for everything else:
+                //Types that don't match (int to uint[2])
+                //Recursion for multidimensions
+                static if (!hasElaborateAssign!UT && is(typeof(chunk[] = arg)))
+                    chunk[] = arg;
+                else
+                    foreach(i; 0 .. n)
+                        .emplaceImpl!E(chunk[i], arg);
+            }
+            else
+                static assert(0, convFormat("Sorry, this implementation doesn't know how to emplace a %s with a %s", T.stringof, Arg.stringof));
+
+            return chunk;
+        }
+        else
+        {
+            chunk = arg;
+            return chunk;
+        }
+    }
+    // ditto
+    static if (is(T == struct))
+    ref UT emplaceImpl(Args...)(ref UT chunk, auto ref Args args)
+    {
+		makeClass(result, args);
+        static if (Args.length == 1 && is(Args[0] : T) &&
+            is (typeof({T t = args[0];})) //Check for legal postblit
+            )
+        {
+            static if (is(Unqual!T == Unqual!(Args[0])))
+            {
+                //Types match exactly: we postblit
+                static if (!hasElaborateAssign!UT && isAssignable!(UT, T))
+                    chunk = args[0];
+                else
+                {
+                    import core.stdc.string : memcpy;
+                    // This is known to be safe as the two values are the same
+                    // type and the source (args[0]) should be initialized
+                    () @trusted { memcpy(&chunk, &args[0], T.sizeof); }();
+                    static if (hasElaborateCopyConstructor!T)
+                        _postblitRecurse(chunk);
+                }
+            }
+            else
+                //Alias this. Coerce to type T.
+                .emplaceImpl!T(chunk, cast(T)args[0]);
+        }
+        else static if (is(typeof(chunk.__ctor(args))))
+        {
+            // T defines a genuine constructor accepting args
+            // Go the classic route: write .init first, then call ctor
+            emplaceInitializer(chunk);
+            chunk.__ctor(args);
+        }
+        else static if (is(typeof(T.opCall(args))))
+        {
+            //Can be built calling opCall
+            emplaceOpCaller(chunk, args); //emplaceOpCaller is deprecated
+        }
+        else static if (is(typeof(T(args))))
+        {
+            // Struct without constructor that has one matching field for
+            // each argument. Individually emplace each field
+            emplaceInitializer(chunk);
+            foreach (i, ref field; chunk.tupleof[0 .. Args.length])
+            {
+                alias Field = typeof(field);
+                alias UField = Unqual!Field;
+                static if (is(Field == UField))
+                    .emplaceImpl!Field(field, args[i]);
+                else
+                    .emplaceImpl!Field(*cast(Unqual!Field*)&field, args[i]);
+            }
+        }
+        else
+        {
+            //We can't emplace. Try to diagnose a disabled postblit.
+            static assert(!(Args.length == 1 && is(Args[0] : T)),
+                convFormat("Cannot emplace a %1$s because %1$s.this(this) is annotated with @disable.", T.stringof));
+
+            //We can't emplace.
+            static assert(false,
+                convFormat("%s cannot be emplaced from %s.", T.stringof, Args[].stringof));
+        }
+
+        return chunk;
+    }
+}
+
+private void testEmplaceChunk(void[] chunk, size_t typeSize, size_t typeAlignment, string typeName) @nogc pure nothrow
+{
+    assert(chunk.length >= typeSize, "emplace: Chunk size too small.");
+    assert((cast(size_t)chunk.ptr) % typeAlignment == 0, "emplace: Chunk is not aligned.");
+}
+
+//emplace helper functions
+private ref T emplaceInitializer(T)(ref T chunk) @trusted pure nothrow
+{
+    static if (!hasElaborateAssign!T && isAssignable!T)
+        chunk = T.init;
+    else
+    {
+        import core.stdc.string : memcpy;
+        static immutable T init = T.init;
+        memcpy(&chunk, &init, T.sizeof);
+    }
+    return chunk;
+}
+
+T* emplace(T)(T* chunk) @safe pure nothrow
+{
+    emplaceImpl!T(*chunk);
+    return chunk;
+}
+
+T* emplace(T, Args...)(T* chunk, auto ref Args args)
+if (!is(T == struct) && Args.length == 1)
+{
+    emplaceImpl!T(*chunk, args);
+    return chunk;
+}
+/// ditto
+T* emplace(T, Args...)(T* chunk, auto ref Args args)
+if (is(T == struct))
+{
+    emplaceImpl!T(*chunk, args);
+    return chunk;
+}
+}
+
 class InGenFactory {
 	import std.traits;
 	import std.stdio;
@@ -32,7 +300,7 @@ class InGenFactory {
 		} else {
 			import core.memory : GC;
 			auto mem = new void[__traits(classInstanceSize, T)];
-			return emplace!T(mem, args);
+			return ingenEmplace!T(mem, args);
 		}
 	}
 
@@ -55,44 +323,12 @@ class InGenFactory {
 		makeClass(cls);
 	}
 
-
 	private: 
 	
-	static void testEmplaceChunk(void[] chunk, size_t typeSize, 
-			size_t typeAlignment, string typeName) @nogc pure nothrow
-	{
-	    assert(chunk.length >= typeSize, "emplace: Chunk size too small.");
-	    assert((cast(size_t)chunk.ptr) % typeAlignment == 0, 
-			"emplace: Chunk is not aligned."
-		);
-	}
-
-	static T emplace(T, Args...)(void[] chunk, auto ref Args args)
+	static T ingenEmplace(T, Args...)(ref void[] chunk, auto ref Args args)
 		@trusted if (is(T == class))
 	{
-	    enum classSize = __traits(classInstanceSize, T);
-	    testEmplaceChunk(chunk, classSize, classInstanceAlignment!T, T.stringof);
-	    auto result = cast(T) chunk.ptr;
-	
-	    // Initialize the object in its pre-ctor state
-	    chunk[0 .. classSize] = typeid(T).initializer[];
-
-		// Set all the injectables
-		makeClass(result, args);
-	
-	    // Call the ctor if any
-	    static if (is(typeof(result.__ctor(args))))
-	    {
-	        // T defines a genuine constructor accepting args
-	        // Go the classic route: write .init first, then call ctor
-	        result.__ctor(args);
-	    }
-	    else
-	    {
-	        static assert(args.length == 0 && !is(typeof(&T.__ctor)),
-	            "Don't know how to initialize an object of type "
-	            ~ T.stringof ~ " with arguments " ~ Args.stringof);
-	    }
+		T result = emplace!T(chunk, args);
 	    return result;
 	}
 
@@ -163,7 +399,7 @@ class TestInj3 : Injectable {
 
 //enum InGen;
 
-class TestClass {
+class TestClass : Injectable {
 	/** InGen(10) will check if there is already an instance of TestInj1 which
 	  was constructed with the value 10. If it exists, it is returned.
 	  Otherwise a TestInj1 is created with 10 passed to its constructor.
@@ -177,6 +413,10 @@ class TestClass {
 
 class TestClass2 {
 	TestInj1 inj1;
+}
+
+class TestClass3 {
+	@InGen() TestClass tc;
 }
 
 interface SomeInterface {
@@ -234,4 +474,29 @@ unittest {
 
 	import std.exception : assertThrown;
 	assertThrown(InGenFactory.get!TestInj2());
+}
+
+unittest {
+	auto tc = InGenFactory.make!TestClass3();
+	assert(tc !is null);
+	assert(tc.tc !is null);
+	assert(tc.tc.inj1 !is null);
+	assert(tc.tc.inj1.a == 10);
+	assert(tc.tc.inj2 !is null);
+	assert(tc.tc.inj2.s == "Foo");
+	assert(tc.tc.inj3 !is null);
+
+	auto tc2 = InGenFactory.make!TestClass3();
+	assert(tc2 !is null);
+	assert(tc2.tc !is null);
+	assert(tc2.tc.inj1 !is null);
+	assert(tc2.tc.inj1.a == 10);
+	assert(tc2.tc.inj2 !is null);
+	assert(tc2.tc.inj2.s == "Foo");
+	assert(tc2.tc.inj3 !is null);
+
+	assert(tc.tc is tc2.tc);
+	assert(tc.tc.inj1 is tc2.tc.inj1);
+	assert(tc.tc.inj2 !is tc2.tc.inj2);
+	assert(tc.tc.inj3 is tc2.tc.inj3);
 }
