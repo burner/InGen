@@ -42,7 +42,7 @@ class TestClass {
 	*/
 	@InGen(10) TestInj1 inj1;
 	int notInjected;
-	@InGenNew("Foo") TestInj2 inj2;
+	@InGen("Foo") TestInj2 inj2;
 	@InGen() TestInj3 inj3;
 }
 
@@ -76,7 +76,7 @@ unittest {
 	assert(tc_2.inj2.s == "Foo");
 
 	assert(tc.inj1 is tc_2.inj1);
-	assert(tc.inj2 !is tc_2.inj2); 
+	assert(tc.inj2 is tc_2.inj2); 
 	assert(tc.inj3 is tc_2.inj3);
 
 	auto tc2 = InGenFactory.make!TestClass2();
