@@ -6,19 +6,12 @@ interface Injectable {
 }
 
 enum InGenEnums {
-	Singleton,
-	New,
+	Singleton
 }
 
 struct InGen {
 	static auto opCall(T...)(T args) {
 		return tuple(InGenEnums.Singleton, args);
-	}
-}
-
-struct InGenNew {
-	static auto opCall(T...)(T args) {
-		return tuple(InGenEnums.New, args);
 	}
 }
 
@@ -285,33 +278,7 @@ class InGenFactory {
 							InGenFactory.instances[s] = tmp;
 							__traits(getMember, ret, it) = tmp;
 						}
-						recreateStandaloneInjectabiles(
-							__traits(getMember, ret, it)
-						);
-					} else if(jt.length > 0 && jt[0] == InGenEnums.New) {
-						__traits(getMember, ret, it) = 
-							InGenFactory.make!Type(jt[1 .. $]);
-						recreateStandaloneInjectabiles(
-							__traits(getMember, ret, it)
-						);
 					}
-				}
-			}
-		}
-	}
-
-	static void recreateStandaloneInjectabiles(T)(ref T t) {
-		foreach(it; __traits(allMembers, T)) {
-			foreach(jt; __traits(getAttributes, __traits(getMember, T, it))) {
-				static if(isTuple!(typeof(jt))) {
-					alias Type = typeof(__traits(getMember, T, it));
-					if(jt.length > 0 && jt[0] == InGenEnums.New) {
-						__traits(getMember, t, it) = 
-							InGenFactory.make!Type(jt[1 .. $]);
-					}
-					recreateStandaloneInjectabiles(
-						__traits(getMember, t, it)
-					);
 				}
 			}
 		}
@@ -367,7 +334,7 @@ class TestClass : Injectable {
 	*/
 	@InGen(10) TestInj1 inj1;
 	int notInjected;
-	@InGenNew("Foo") TestInj2 inj2;
+	@InGen("Foo") TestInj2 inj2;
 	@InGen() TestInj3 inj3;
 
 	TestStruct ts;
@@ -423,7 +390,7 @@ unittest {
 	assert(tc_2.inj2.s == "Foo");
 
 	assert(tc.inj1 is tc_2.inj1);
-	assert(tc.inj2 !is tc_2.inj2); 
+	assert(tc.inj2 is tc_2.inj2); 
 	assert(tc.inj3 is tc_2.inj3);
 
 	auto tc2 = InGenFactory.make!TestClass2();
@@ -473,6 +440,6 @@ unittest {
 
 	assert(tc.tc is tc2.tc);
 	assert(tc.tc.inj1 is tc2.tc.inj1);
-	assert(tc.tc.inj2 !is tc2.tc.inj2);
+	assert(tc.tc.inj2 is tc2.tc.inj2);
 	assert(tc.tc.inj3 is tc2.tc.inj3);
 }
